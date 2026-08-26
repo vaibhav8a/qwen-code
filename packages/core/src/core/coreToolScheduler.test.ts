@@ -839,7 +839,7 @@ describe('CoreToolScheduler', () => {
     permissionManager?: {
       isToolEnabled: (name: string) => Promise<boolean>;
       findMatchingDenyRule: (ctx: unknown) => string | undefined;
-      isPermissionsAllowListActive: () => boolean;
+      isToolDisabledByCoreToolsAllowList?: (name: string) => boolean;
     };
   }) {
     const ensureTool = vi.fn(
@@ -3533,128 +3533,6 @@ describe('CoreToolScheduler', () => {
     expect(ensureTool).not.toHaveBeenCalled();
   });
 
-  it('attributes a registry-allowlist miss to permissions.allow, not a deny rule (#9827)', async () => {
-    // When isToolEnabled rejects because the tool is not covered by the
-    // active permissions.allow allowlist, findMatchingDenyRule finds
-    // nothing — nothing was ever asked or declined. The error must point
-    // at the real config knob instead of citing a nonexistent deny rule.
-    const execute = vi.fn().mockResolvedValue({
-      llmContent: 'sent',
-      returnDisplay: 'sent',
-    });
-    const toolsByName = new Map<string, MockTool>([
-      [
-        ToolNames.SEND_MESSAGE,
-        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
-      ],
-    ]);
-    const permissionManager = {
-      isToolEnabled: vi.fn().mockResolvedValue(false),
-      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
-      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
-    };
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName,
-        permissionManager,
-      });
-
-    await scheduler.schedule(
-      [
-        {
-          callId: 'allowlist-miss',
-          name: ToolNames.SEND_MESSAGE,
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'prompt-allowlist-miss',
-        },
-      ],
-      new AbortController().signal,
-    );
-
-    expect(onAllToolCallsComplete).toHaveBeenCalled();
-    const completedCalls = onAllToolCallsComplete.mock
-      .calls[0][0] as ToolCall[];
-    const completedCall = completedCalls[0];
-    expect(completedCall.status).toBe('error');
-    if (completedCall.status === 'error') {
-      expect(completedCall.response.errorType).toBe(
-        ToolErrorType.EXECUTION_DENIED,
-      );
-      const message = completedCall.response.error?.message ?? '';
-      expect(message).toContain('permissions.allow');
-      expect(message).toContain(ToolNames.SEND_MESSAGE);
-      expect(message).not.toContain('declined');
-      expect(message).not.toContain('deny rule');
-    }
-    expect(execute).not.toHaveBeenCalled();
-  });
-
-  it('lets a matching deny rule win over the allowlist-miss attribution (#9827)', async () => {
-    // The deny-rule arm comes FIRST in the message branch, and it must:
-    // a tool rejected by a deny rule is by definition not covered by any
-    // allow/ask rule, so under an active allowlist BOTH the deny arm and
-    // the allowlist-miss arm could fire. The denial is real here —
-    // something was declined — so the message must cite the matching deny
-    // rule, not the "not covered by permissions.allow" attribution (whose
-    // remediation would be wrong: an allow rule cannot override a deny
-    // rule, the only fix is removing the deny rule itself).
-    const execute = vi.fn().mockResolvedValue({
-      llmContent: 'sent',
-      returnDisplay: 'sent',
-    });
-    const toolsByName = new Map<string, MockTool>([
-      [
-        ToolNames.SEND_MESSAGE,
-        new MockTool({ name: ToolNames.SEND_MESSAGE, execute }),
-      ],
-    ]);
-    const permissionManager = {
-      isToolEnabled: vi.fn().mockResolvedValue(false),
-      findMatchingDenyRule: vi.fn().mockReturnValue(ToolNames.SEND_MESSAGE),
-      // Arm the allowlist-miss branch too so this test pins the
-      // if/else-if ORDERING, not just the deny arm in isolation.
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
-      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
-    };
-    const { scheduler, onAllToolCallsComplete } =
-      createSchedulerForLegacyToolTests({
-        toolsByName,
-        permissionManager,
-      });
-
-    await scheduler.schedule(
-      [
-        {
-          callId: 'deny-rule-beats-allowlist',
-          name: ToolNames.SEND_MESSAGE,
-          args: {},
-          isClientInitiated: false,
-          prompt_id: 'prompt-deny-rule-beats-allowlist',
-        },
-      ],
-      new AbortController().signal,
-    );
-
-    expect(onAllToolCallsComplete).toHaveBeenCalled();
-    const completedCalls = onAllToolCallsComplete.mock
-      .calls[0][0] as ToolCall[];
-    const completedCall = completedCalls[0];
-    expect(completedCall.status).toBe('error');
-    if (completedCall.status === 'error') {
-      expect(completedCall.response.errorType).toBe(
-        ToolErrorType.EXECUTION_DENIED,
-      );
-      const message = completedCall.response.error?.message ?? '';
-      expect(message).toBe(
-        `Qwen Code requires permission to use "${ToolNames.SEND_MESSAGE}", but that permission was declined. Matching deny rule: "${ToolNames.SEND_MESSAGE}".`,
-      );
-      expect(message).not.toContain('permissions.allow');
-    }
-    expect(execute).not.toHaveBeenCalled();
-  });
-
   it('lets a matching deny rule win over the generic declined fallback without an active allowlist (#9827)', async () => {
     // Without an active allowlist only the deny arm and the generic
     // fallback arm can fire; the matching rule must still surface so the
@@ -3673,7 +3551,6 @@ describe('CoreToolScheduler', () => {
     const permissionManager = {
       isToolEnabled: vi.fn().mockResolvedValue(false),
       findMatchingDenyRule: vi.fn().mockReturnValue(ToolNames.SEND_MESSAGE),
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(false),
     };
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
@@ -3730,8 +3607,6 @@ describe('CoreToolScheduler', () => {
     const permissionManager = {
       isToolEnabled: vi.fn().mockResolvedValue(false),
       findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
-      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(true),
     };
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
@@ -3771,9 +3646,8 @@ describe('CoreToolScheduler', () => {
   });
 
   it('attributes a rejection by the legacy coreTools allowlist to core tools, not permissions.allow (#10075)', async () => {
-    // Since #10075 an uncovered `permissions.allow` tool is deferred (still
-    // registered and callable), never rejected at call time — so a
-    // rejection with no matching deny rule under an active allowlist can
+    // Since the #10075 decoupling `permissions.allow` is pure auto-approval
+    // and never rejects a tool, so a rejection with no matching deny rule can
     // only come from the legacy coreTools allowlist, and the message must
     // point at that knob instead of advising a permissions.allow rule that
     // would be a no-op.
@@ -3787,8 +3661,6 @@ describe('CoreToolScheduler', () => {
     const permissionManager = {
       isToolEnabled: vi.fn().mockResolvedValue(false),
       findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
-      isCoveredByAllowOrAskRule: vi.fn().mockReturnValue(false),
       isToolDisabledByCoreToolsAllowList: vi.fn().mockReturnValue(true),
     };
     const { scheduler, onAllToolCallsComplete } =
@@ -3840,7 +3712,6 @@ describe('CoreToolScheduler', () => {
     const permissionManager = {
       isToolEnabled: vi.fn().mockResolvedValue(false),
       findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(false),
     };
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
@@ -3874,20 +3745,15 @@ describe('CoreToolScheduler', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
-  it('keeps a memory-scoped shim rejection on the pre-#9827 declined message instead of throwing (#9827)', async () => {
+  it('keeps a memory-scoped shim rejection on the declined message instead of throwing (#9827)', async () => {
     // Production installs the memory-scoped PermissionManager shim via
-    // `as unknown as PermissionManager` (memory-scoped-agent-config.ts);
-    // the cast used to hide that the shim lacked
-    // `isPermissionsAllowListActive`, so a shim-rejected call under an
-    // active allowlist threw TypeError in the message branch below and
-    // surfaced as an UNHANDLED_EXCEPTION tool error instead of the
-    // designed permission error. The shim also lacks
-    // `isCoveredByAllowOrAskRule`, so coverage is unknown for it and the
-    // fallback must stay on the pre-#9827 declined message — never the
-    // allowlist attribution, which would be wrong for a COVERED tool
-    // rejected by a different gate (e.g. the legacy coreTools allowlist).
-    // Drive the REAL shim through the scheduler to pin the end-to-end
-    // path.
+    // `as unknown as PermissionManager` (memory-scoped-agent-config.ts).
+    // Since the #10075 decoupling the scheduler's message branch only calls
+    // `findMatchingDenyRule` and (optionally)
+    // `isToolDisabledByCoreToolsAllowList`; the shim provides both, so a
+    // shim-rejected call must surface the designed permission error rather
+    // than an UNHANDLED_EXCEPTION. Drive the REAL shim through the
+    // scheduler to pin the end-to-end path.
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'sent',
       returnDisplay: 'sent',
@@ -3904,7 +3770,6 @@ describe('CoreToolScheduler', () => {
       hasMatchingAskRule: vi.fn().mockReturnValue(false),
       hasRelevantRules: vi.fn().mockReturnValue(false),
       evaluate: vi.fn().mockResolvedValue('deny'),
-      isPermissionsAllowListActive: vi.fn().mockReturnValue(true),
     };
     const scopedConfig = createMemoryScopedAgentConfig(
       {
@@ -3924,18 +3789,18 @@ describe('CoreToolScheduler', () => {
         permissionManager: shimPm as unknown as {
           isToolEnabled: (name: string) => Promise<boolean>;
           findMatchingDenyRule: (ctx: unknown) => string | undefined;
-          isPermissionsAllowListActive: () => boolean;
+          isToolDisabledByCoreToolsAllowList?: (name: string) => boolean;
         },
       });
 
     await scheduler.schedule(
       [
         {
-          callId: 'shim-allowlist-miss',
+          callId: 'shim-rejection',
           name: ToolNames.SEND_MESSAGE,
           args: {},
           isClientInitiated: false,
-          prompt_id: 'prompt-shim-allowlist-miss',
+          prompt_id: 'prompt-shim-rejection',
         },
       ],
       new AbortController().signal,

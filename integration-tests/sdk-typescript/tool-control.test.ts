@@ -2450,16 +2450,16 @@ describe('Tool Control Parameters (E2E)', () => {
     );
   });
 
-  // Regression guard for #10075: a pre-existing `permissions.allow`
-  // allowlist must not silently remove uncovered built-in tools (0.22.1
-  // unregistered them — absent from /tools, unfindable via tool_search,
-  // permission-errored at call time). Since the fix they are demoted to
-  // deferred: their schemas stay out of the eager model request (#9827
-  // schema-shrink preserved) but they remain registered, discoverable via
-  // tool_search, and callable through the normal approval flow.
-  describe('permissions.allow registry allowlist from settings (#10075)', () => {
+  // Regression guard for #10075 (decoupling): a pre-existing
+  // `permissions.allow` must not remove or demote uncovered built-in tools.
+  // Since the decoupling, `permissions.allow` is pure auto-approval — every
+  // built-in stays registered and is advertised in the eager model request,
+  // and a call goes through the normal approval flow. Tools whose schemas a
+  // constrained-decoding backend cannot handle (#9827) are excluded via
+  // `permissions.deny` / `--exclude-tools`, not via `permissions.allow`.
+  describe('permissions.allow is pure auto-approval (#10075 decoupling)', () => {
     beforeEach(async () => {
-      testDir = await helper.setup('tool-control-allowlist-10075', {
+      testDir = await helper.setup('tool-control-allowlist-decouple-10075', {
         settings: {
           fastModel: 'openai:fake-model',
           // Covers read_file + shell family only — write_file/edit stay
@@ -2470,7 +2470,7 @@ describe('Tool Control Parameters (E2E)', () => {
     });
 
     it(
-      'keeps uncovered tools callable while excluding their schemas from the eager request',
+      'keeps uncovered tools registered, eagerly advertised, and callable',
       async () => {
         await helper.createFile('test.txt', INITIAL_CONTENT);
 
@@ -2483,9 +2483,10 @@ describe('Tool Control Parameters (E2E)', () => {
                   { file_path: helper.getPath('test.txt') },
                   'read-covered',
                 ),
-                // Uncovered by the allowlist — before the fix this was
-                // permission-errored ("not covered by any permissions.allow
-                // rule"), now it must run through the normal approval flow.
+                // Uncovered by permissions.allow — before the decoupling this
+                // was removed (0.22.1) or demoted (#10082); now it must stay
+                // registered, advertised, and run through the normal approval
+                // flow.
                 fakeToolCall(
                   'write_file',
                   {
@@ -2518,15 +2519,14 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          // Schema-shrink side (#9827): the covered tool is in the eager
-          // request, the uncovered one is not.
+          // Both the covered and the uncovered tools are advertised in the
+          // eager request — permissions.allow no longer gates registration.
           const advertisedTools = advertisedToolNames(fakeServer);
           expect(advertisedTools).toContain('read_file');
-          expect(advertisedTools).not.toContain('write_file');
-          expect(advertisedTools).not.toContain('edit');
+          expect(advertisedTools).toContain('write_file');
+          expect(advertisedTools).toContain('edit');
 
-          // Capability side (#10075): the uncovered tool is still
-          // registered and executes instead of being permission-errored.
+          // The uncovered tool executes instead of being permission-errored.
           const toolNames = findToolCalls(messages).map(
             (tc) => tc.toolUse.name,
           );
@@ -2537,81 +2537,6 @@ describe('Tool Control Parameters (E2E)', () => {
           for (const result of writeResults) {
             expect(result.isError).toBe(false);
             expect(result.content).not.toContain('permissions.allow');
-          }
-        } finally {
-          await q.close();
-          await fakeServer.close();
-        }
-      },
-      TEST_TIMEOUT,
-    );
-
-    it(
-      'discovers and loads an uncovered tool via tool_search',
-      async () => {
-        await helper.createFile('test.txt', INITIAL_CONTENT);
-
-        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-          if (requestIndex === 0) {
-            // The model does not see write_file in the eager request; it
-            // discovers it on demand via tool_search.
-            return {
-              toolCalls: [
-                fakeToolCall(
-                  'tool_search',
-                  { query: 'select:write_file' },
-                  'search-write',
-                ),
-              ],
-            };
-          }
-          if (requestIndex === 1) {
-            return {
-              toolCalls: [
-                fakeToolCall(
-                  'write_file',
-                  {
-                    file_path: helper.getPath('test.txt'),
-                    content: 'modified',
-                  },
-                  'write-after-search',
-                ),
-              ],
-            };
-          }
-          return { content: 'Done.' };
-        }, FAKE_SERVER_OPTIONS);
-
-        const q = query({
-          prompt: 'Find the write tool and write "modified" to test.txt.',
-          options: {
-            ...SHARED_TEST_OPTIONS,
-            ...fakeModelOptions(fakeServer.baseUrl),
-            cwd: testDir,
-            permissionMode: 'yolo',
-            debug: false,
-          },
-        });
-
-        const messages: SDKMessage[] = [];
-
-        try {
-          for await (const message of q) {
-            messages.push(message);
-          }
-
-          // tool_search loads the deferred tool (it must be registered, or
-          // the lookup would report it missing).
-          const searchResults = findToolResults(messages, 'tool_search');
-          expect(searchResults.length).toBeGreaterThan(0);
-          expect(searchResults[0].isError).toBe(false);
-          expect(searchResults[0].content).toContain('write_file');
-
-          // After discovery the tool executes normally.
-          const writeResults = findToolResults(messages, 'write_file');
-          expect(writeResults.length).toBeGreaterThan(0);
-          for (const result of writeResults) {
-            expect(result.isError).toBe(false);
           }
         } finally {
           await q.close();
